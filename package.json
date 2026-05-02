@@ -1,0 +1,40 @@
+{
+  "name": "st-character-card-forge",
+  "version": "0.1.0",
+  "description": "Portable desktop editor for SillyTavern character cards with optional NanoGPT-compatible API support.",
+  "main": "src/main/main.js",
+  "author": "Codex",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "build:dir": "electron-builder --dir",
+    "build:portable": "electron-builder --win portable"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.codex.stcharactercardforge",
+    "productName": "SillyTavern Character Card Forge",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}-portable.${ext}"
+    }
+  }
+}
