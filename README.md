@@ -2,6 +2,8 @@
 
 Portable desktop editor for SillyTavern character cards, built with Electron.
 
+The renderer also ships as a browser build for GitHub Pages under [`docs/index.html`](./docs/index.html).
+
 ## Features
 
 - Full SillyTavern V2 card editing flow
@@ -18,6 +20,15 @@ Portable desktop editor for SillyTavern character cards, built with Electron.
 npm install
 npm start
 ```
+
+## GitHub Pages
+
+The repository includes a static browser build in `docs/`.
+
+- GitHub Pages source: `main` branch
+- Folder: `/docs`
+
+Browser mode keeps local draft storage, PNG/JSON import/export, and direct API access where the provider allows CORS.
 
 ## Portable build
 
