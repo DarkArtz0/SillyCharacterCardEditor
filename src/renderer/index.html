@@ -240,6 +240,25 @@
     border-color: color-mix(in srgb, var(--accent) 48%, var(--line));
     color: var(--accent-2);
   }
+  .vault-item.active {
+    border-color: color-mix(in srgb, var(--accent) 48%, var(--line));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 24%, transparent);
+  }
+  .vault-version {
+    padding: .72rem .82rem;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: #121419;
+    cursor: pointer;
+  }
+  .vault-version.active {
+    border-color: color-mix(in srgb, var(--accent) 48%, var(--line));
+    background: color-mix(in srgb, var(--accent) 11%, #121419);
+  }
+  .vault-version b,
+  .vault-item b { display: block; }
+  .vault-version time,
+  .vault-item time { color: var(--muted); font-size: .76rem; }
   .image-preview-shell {
     min-height: 18rem;
     display: grid;
@@ -570,6 +589,8 @@ const IMAGE_MODELS = [
   { id: "chroma", label: "Chroma", note: "Stylized output" }
 ];
 const IMAGE_SIZES = ["256x256", "512x512", "1024x1024"];
+const AUTOSAVE_INTERVAL_MS = 60_000;
+const MAJOR_AUTOSAVE_DELAY_MS = 5_000;
 
 const tabs = [
   { id: "basic", label: "Basics" },
@@ -578,6 +599,7 @@ const tabs = [
   { id: "greetings", label: "Greetings" },
   { id: "book", label: "Character Book" },
   { id: "extensions", label: "Extensions" },
+  { id: "vault", label: "Vault" },
   { id: "model", label: "Model Settings" }
 ];
 
@@ -660,6 +682,12 @@ let state = {
     extensionsJson: "{}",
     entries: []
   },
+  vault: {
+    records: [],
+    currentCharacterId: "",
+    selectedCharacterId: "",
+    selectedVersionId: ""
+  },
   settings: {
     provider: "none",
     endpoint: "https://nano-gpt.com/api/v1/chat/completions",
@@ -681,6 +709,8 @@ let activeWandField = null;
 let appMeta = null;
 let availableModels = [];
 let imageGenResult = null;
+let autosaveTimers = { normal: null, major: null };
+let dirtyState = { draft: false, major: false, lastSavedAt: 0 };
 
 function $(id) { return document.getElementById(id); }
 function esc(s) {
@@ -712,6 +742,166 @@ function parseObjectJson(raw, fallback = {}) {
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
   } catch {}
   return fallback;
+}
+function nowIso() {
+  return new Date().toISOString();
+}
+function uid(prefix = "id") {
+  const rand = Math.random().toString(36).slice(2, 10);
+  return `${prefix}-${Date.now().toString(36)}-${rand}`;
+}
+function formatStamp(iso) {
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return iso || "";
+  }
+}
+function getCharacterDisplayName(snapshot = null) {
+  const source = snapshot?.data || state.data;
+  return String(source?.name || "").trim() || "Untitled character";
+}
+function cloneCharacterSnapshot() {
+  return JSON.parse(JSON.stringify({
+    avatar: state.avatar,
+    data: state.data,
+    book: state.book
+  }));
+}
+function hydrateFromSnapshot(snapshot) {
+  if (!snapshot) return;
+  state.avatar = snapshot.avatar || DEFAULT_AVATAR;
+  state.data = deepMerge(JSON.parse(JSON.stringify(state.data)), snapshot.data || {});
+  state.book = deepMerge(JSON.parse(JSON.stringify(state.book)), snapshot.book || {});
+  render();
+}
+function summarizeVersion(snapshot) {
+  const card = snapshot?.data || {};
+  const tags = parseTags(card.tagsText);
+  const bits = [];
+  if (String(card.character_version || "").trim()) bits.push(`version ${card.character_version.trim()}`);
+  if (tags.length) bits.push(`${tags.length} tag${tags.length === 1 ? "" : "s"}`);
+  const entries = snapshot?.book?.entries?.length || 0;
+  if (entries) bits.push(`${entries} lore entr${entries === 1 ? "y" : "ies"}`);
+  return bits.join(" · ") || "Character snapshot";
+}
+function ensureVaultShape() {
+  if (!state.vault || typeof state.vault !== "object") {
+    state.vault = { records: [], currentCharacterId: "", selectedCharacterId: "", selectedVersionId: "" };
+  }
+  state.vault.records = Array.isArray(state.vault.records) ? state.vault.records : [];
+}
+function getVaultRecord(recordId = state.vault.selectedCharacterId || state.vault.currentCharacterId) {
+  ensureVaultShape();
+  return state.vault.records.find((record) => record.id === recordId) || null;
+}
+function selectVaultVersion(recordId, versionId) {
+  state.vault.selectedCharacterId = recordId || "";
+  state.vault.selectedVersionId = versionId || "";
+}
+function captureVaultVersion({ forceNewRecord = false } = {}) {
+  ensureVaultShape();
+  const stamp = nowIso();
+  const snapshot = cloneCharacterSnapshot();
+  const name = getCharacterDisplayName(snapshot);
+  let record = forceNewRecord ? null : getVaultRecord();
+  if (!record) {
+    record = {
+      id: uid("char"),
+      name,
+      createdAt: stamp,
+      updatedAt: stamp,
+      versions: []
+    };
+    state.vault.records.unshift(record);
+    state.vault.currentCharacterId = record.id;
+  }
+  record.name = name;
+  record.updatedAt = stamp;
+  const version = {
+    id: uid("ver"),
+    savedAt: stamp,
+    label: String(state.data.character_version || "").trim() || `Version ${record.versions.length + 1}`,
+    summary: summarizeVersion(snapshot),
+    snapshot
+  };
+  record.versions.unshift(version);
+  selectVaultVersion(record.id, version.id);
+  return { record, version };
+}
+function saveCurrentToVault(forceNewRecord = false) {
+  const { record, version } = captureVaultVersion({ forceNewRecord });
+  markDirty(true);
+  flushAutosave({ silent: true });
+  if (state.activeTab === "vault") renderVault();
+  else updatePreview();
+  notify(forceNewRecord ? `Saved new vault character: ${record.name}.` : `Saved vault version: ${version.label}.`);
+}
+function loadVaultVersion(recordId, versionId) {
+  const record = getVaultRecord(recordId);
+  const version = record?.versions?.find((item) => item.id === versionId);
+  if (!version) return notify("Vault version not found.", "bad");
+  state.vault.currentCharacterId = record.id;
+  selectVaultVersion(record.id, version.id);
+  hydrateFromSnapshot(version.snapshot);
+  markDirty(true);
+  notify(`Loaded ${record.name} · ${version.label}.`);
+}
+function deleteVaultVersion(recordId, versionId) {
+  const record = getVaultRecord(recordId);
+  if (!record) return;
+  record.versions = record.versions.filter((item) => item.id !== versionId);
+  if (!record.versions.length) {
+    state.vault.records = state.vault.records.filter((item) => item.id !== recordId);
+    if (state.vault.currentCharacterId === recordId) state.vault.currentCharacterId = "";
+    if (state.vault.selectedCharacterId === recordId) selectVaultVersion("", "");
+  } else {
+    record.updatedAt = nowIso();
+    if (state.vault.selectedVersionId === versionId) {
+      selectVaultVersion(recordId, record.versions[0].id);
+    }
+  }
+  markDirty(true);
+  flushAutosave({ silent: true });
+  renderVault();
+  notify("Vault version deleted.");
+}
+function getPersistableState() {
+  const copy = JSON.parse(JSON.stringify(state));
+  if (!copy.settings.saveKey) copy.settings.apiKey = "";
+  return copy;
+}
+function persistStateToStorage(copy) {
+  if (DESKTOP) return window.desktopBridge.saveState(copy);
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(copy));
+  localStorage.setItem(SETTINGS_KEY, JSON.stringify(copy.settings));
+  return Promise.resolve();
+}
+async function flushAutosave({ silent = false } = {}) {
+  if (!dirtyState.draft) return;
+  const copy = getPersistableState();
+  try {
+    await persistStateToStorage(copy);
+    dirtyState.draft = false;
+    dirtyState.major = false;
+    dirtyState.lastSavedAt = Date.now();
+    if (!silent) notify("Autosaved draft.");
+  } catch (err) {
+    if (!silent) notify("Autosave failed: " + err.message, "bad");
+  }
+}
+function scheduleAutosave(isMajor = false) {
+  clearTimeout(autosaveTimers.normal);
+  autosaveTimers.normal = setTimeout(() => flushAutosave({ silent: true }), AUTOSAVE_INTERVAL_MS);
+  if (isMajor) {
+    dirtyState.major = true;
+    clearTimeout(autosaveTimers.major);
+    autosaveTimers.major = setTimeout(() => flushAutosave({ silent: true }), MAJOR_AUTOSAVE_DELAY_MS);
+  }
+}
+function markDirty(isMajor = false) {
+  dirtyState.draft = true;
+  scheduleAutosave(isMajor);
 }
 function applyAccent(color) {
   const next = normalizeColor(color);
@@ -843,6 +1033,7 @@ function useGeneratedImageAsAvatar() {
   if (!dataUrl) return;
   state.avatar = dataUrl;
   render();
+  markDirty(true);
   notify("Generated image set as avatar.");
 }
 function downloadGeneratedImage() {
@@ -995,6 +1186,7 @@ function hydrateFromCard(card) {
     };
   }
   render();
+  markDirty(true);
   notify("Imported card data.");
 }
 function render() {
@@ -1004,6 +1196,7 @@ function render() {
   applyAccent(state.settings.accentColor || "#f28c28");
   if (state.activeTab === "book") renderBook();
   else if (state.activeTab === "greetings") renderGreetings();
+  else if (state.activeTab === "vault") renderVault();
   else if (state.activeTab === "model") renderModel();
   else renderFields(state.activeTab);
   updatePreview();
@@ -1051,6 +1244,7 @@ function bindDataFields() {
       state.data[el.dataset.key] = el.value;
       if (el.dataset.key === "name") $("quickName").value = el.value;
       updatePreview();
+      markDirty();
       if (el.tagName === "TEXTAREA") {
         const count = el.parentElement.querySelector(".count");
         if (count) count.textContent = el.value.length + " chars";
@@ -1079,13 +1273,13 @@ function renderGreetings() {
   </div>`;
   $("addGreeting").onclick = () => {
     state.data.alternate_greetings.push("");
-    renderGreetings(); updatePreview();
+    renderGreetings(); updatePreview(); markDirty(true);
   };
   document.querySelectorAll("[data-greeting]").forEach(el => {
-    el.oninput = () => { state.data.alternate_greetings[Number(el.dataset.greeting)] = el.value; updatePreview(); };
+    el.oninput = () => { state.data.alternate_greetings[Number(el.dataset.greeting)] = el.value; updatePreview(); markDirty(); };
   });
   document.querySelectorAll("[data-del-greet]").forEach(btn => {
-    btn.onclick = () => { state.data.alternate_greetings.splice(Number(btn.dataset.delGreet),1); renderGreetings(); updatePreview(); };
+    btn.onclick = () => { state.data.alternate_greetings.splice(Number(btn.dataset.delGreet),1); renderGreetings(); updatePreview(); markDirty(true); };
   });
   document.querySelectorAll("[data-greet-wand]").forEach(btn => {
     btn.onclick = () => openWand("alternate_greetings." + btn.dataset.greetWand, "greeting");
@@ -1113,15 +1307,15 @@ function renderBook() {
       </div>
     </section>
   </div>`;
-  $("bookName").oninput = e => { state.book.name = e.target.value; updatePreview(); };
-  $("bookDesc").oninput = e => { state.book.description = e.target.value; updatePreview(); };
-  $("bookScan").oninput = e => { state.book.scan_depth = Number(e.target.value || 0); updatePreview(); };
-  $("bookBudget").oninput = e => { state.book.token_budget = Number(e.target.value || 0); updatePreview(); };
-  $("bookRecursive").onchange = e => { state.book.recursive_scanning = e.target.checked; updatePreview(); };
-  $("bookExtensionsJson").oninput = e => { state.book.extensionsJson = e.target.value; updatePreview(); };
+  $("bookName").oninput = e => { state.book.name = e.target.value; updatePreview(); markDirty(); };
+  $("bookDesc").oninput = e => { state.book.description = e.target.value; updatePreview(); markDirty(); };
+  $("bookScan").oninput = e => { state.book.scan_depth = Number(e.target.value || 0); updatePreview(); markDirty(); };
+  $("bookBudget").oninput = e => { state.book.token_budget = Number(e.target.value || 0); updatePreview(); markDirty(); };
+  $("bookRecursive").onchange = e => { state.book.recursive_scanning = e.target.checked; updatePreview(); markDirty(true); };
+  $("bookExtensionsJson").oninput = e => { state.book.extensionsJson = e.target.value; updatePreview(); markDirty(); };
   $("addEntry").onclick = () => {
     state.book.entries.push({ id:"", name:"", keys:"", secondary_keys:"", comment:"", content:"", constant:false, selective:false, use_regex:false, case_sensitive:false, priority:0, insertion_order:state.book.entries.length, enabled:true, position:"before_char", entryExtensionsJson:"{}" });
-    renderBook(); updatePreview();
+    renderBook(); updatePreview(); markDirty(true);
   };
   bindBookEntries();
 }
@@ -1164,13 +1358,88 @@ function bindBookEntries() {
     el.addEventListener(evt, () => {
       state.book.entries[i][key] = el.type === "checkbox" ? el.checked : el.value;
       updatePreview();
+      markDirty(el.type === "checkbox");
     });
   });
   document.querySelectorAll("[data-del-entry]").forEach(btn => btn.onclick = () => {
     state.book.entries.splice(Number(btn.dataset.delEntry), 1);
-    renderBook(); updatePreview();
+    renderBook(); updatePreview(); markDirty(true);
   });
   document.querySelectorAll("[data-entry-wand]").forEach(btn => btn.onclick = () => openWand("book.entries." + btn.dataset.entry + ".content", "lore"));
+}
+function renderVault() {
+  ensureVaultShape();
+  const activeRecordId = state.vault.selectedCharacterId || state.vault.currentCharacterId;
+  const selectedRecord = getVaultRecord(activeRecordId);
+  const versions = selectedRecord?.versions || [];
+  $("view").innerHTML = `<div class="grid">
+    <section class="card pad span-12">
+      <div class="section-head">
+        <div><h2>Character vault</h2><div class="hint">Local character library with version history. Draft autosave still protects work between explicit vault versions.</div></div>
+        <div class="row" style="flex:0 0 auto">
+          <button class="primary" id="vaultSaveVersion">Save version</button>
+          <button id="vaultSaveNew">Save as new character</button>
+        </div>
+      </div>
+      <div class="grid">
+        <div class="span-5">
+          <div class="list">
+            ${state.vault.records.length ? state.vault.records.map((record) => `
+              <button class="mini-card ghost vault-item ${record.id === activeRecordId ? "active" : ""}" data-vault-record="${record.id}">
+                <div class="mini-card-head" style="margin-bottom:.35rem"><b>${esc(record.name || "Untitled character")}</b></div>
+                <time>${esc(formatStamp(record.updatedAt || record.createdAt))}</time>
+                <div class="hint">${record.versions?.length || 0} version${(record.versions?.length || 0) === 1 ? "" : "s"}</div>
+              </button>
+            `).join("") : `<div class="hint">No vault characters yet. Save the current draft to start version history.</div>`}
+          </div>
+        </div>
+        <div class="span-7">
+          ${selectedRecord ? `
+            <div class="mini-card">
+              <div class="mini-card-head">
+                <div>
+                  <b>${esc(selectedRecord.name)}</b>
+                  <time>${esc(formatStamp(selectedRecord.updatedAt || selectedRecord.createdAt))}</time>
+                </div>
+              </div>
+              <div class="list">
+                ${versions.map((version) => `
+                  <div class="vault-version ${version.id === state.vault.selectedVersionId ? "active" : ""}" data-vault-version="${version.id}">
+                    <div class="mini-card-head" style="margin-bottom:.35rem">
+                      <div>
+                        <b>${esc(version.label || "Version")}</b>
+                        <time>${esc(formatStamp(version.savedAt))}</time>
+                      </div>
+                      <div class="row" style="flex:0 0 auto">
+                        <button class="small" data-vault-load="${version.id}">Load</button>
+                        <button class="small danger" data-vault-delete="${version.id}">Delete</button>
+                      </div>
+                    </div>
+                    <div class="hint">${esc(version.summary || "Character snapshot")}</div>
+                  </div>
+                `).join("")}
+              </div>
+            </div>
+          ` : `<div class="hint">Select a vault character to browse its versions.</div>`}
+        </div>
+      </div>
+    </section>
+  </div>`;
+  $("vaultSaveVersion").onclick = () => saveCurrentToVault(false);
+  $("vaultSaveNew").onclick = () => saveCurrentToVault(true);
+  document.querySelectorAll("[data-vault-record]").forEach((btn) => btn.onclick = () => {
+    const record = getVaultRecord(btn.dataset.vaultRecord);
+    if (!record) return;
+    selectVaultVersion(record.id, record.versions?.[0]?.id || "");
+    renderVault();
+  });
+  document.querySelectorAll("[data-vault-version]").forEach((card) => card.onclick = (event) => {
+    if (event.target.closest("button")) return;
+    selectVaultVersion(selectedRecord.id, card.dataset.vaultVersion);
+    renderVault();
+  });
+  document.querySelectorAll("[data-vault-load]").forEach((btn) => btn.onclick = () => loadVaultVersion(selectedRecord.id, btn.dataset.vaultLoad));
+  document.querySelectorAll("[data-vault-delete]").forEach((btn) => btn.onclick = () => deleteVaultVersion(selectedRecord.id, btn.dataset.vaultDelete));
 }
 function renderModel() {
   const s = state.settings;
@@ -1209,8 +1478,8 @@ function renderModel() {
   $("saveSettings").onclick = saveSettingsFromForm;
   $("testApi").onclick = testApi;
   $("chooseModelBtn").onclick = openModelPicker;
-  $("resetPrompts").onclick = () => { state.settings.promptTemplates = structuredClone(defaultPromptTemplates); renderModel(); notify("Prompt templates reset."); };
-  document.querySelectorAll("[data-template]").forEach(el => el.oninput = () => state.settings.promptTemplates[el.dataset.template] = el.value);
+  $("resetPrompts").onclick = () => { state.settings.promptTemplates = structuredClone(defaultPromptTemplates); renderModel(); markDirty(true); notify("Prompt templates reset."); };
+  document.querySelectorAll("[data-template]").forEach(el => el.oninput = () => { state.settings.promptTemplates[el.dataset.template] = el.value; markDirty(); });
 }
 function saveSettingsFromForm() {
   const previousEndpoint = state.settings.endpoint;
@@ -1228,12 +1497,8 @@ function saveSettingsFromForm() {
     availableModels = [];
   }
   applyAccent(state.settings.accentColor);
-  const stored = { ...state.settings, apiKey: state.settings.saveKey ? state.settings.apiKey : "" };
-  if (DESKTOP) {
-    window.desktopBridge.saveState(JSON.parse(JSON.stringify({ ...state, settings: stored }))).catch(() => {});
-  } else {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify(stored));
-  }
+  markDirty(true);
+  flushAutosave({ silent: true });
   notify("Model settings saved.");
 }
 async function testApi() {
@@ -1292,6 +1557,7 @@ function writePath(path, val, mode="replace") {
     state.book.entries[Number(idx)][key] = next;
   } else state.data[path] = next;
   render();
+  markDirty(true);
 }
 function buildWandContext(fieldPath) {
   const card = buildCardJson();
@@ -1660,20 +1926,19 @@ function importFile(file) {
   else reader.readAsText(file);
 }
 function saveLocal() {
-  const copy = JSON.parse(JSON.stringify(state));
-  if (!copy.settings.saveKey) copy.settings.apiKey = "";
-  if (DESKTOP) {
-    window.desktopBridge.saveState(copy).then(() => notify("Saved app draft.")).catch(err => notify("Save failed: " + err.message, "bad"));
-    return;
-  }
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(copy));
-  notify("Saved to local browser storage.");
+  dirtyState.draft = true;
+  flushAutosave()
+    .then(() => notify(DESKTOP ? "Saved app draft." : "Saved to local browser storage."))
+    .catch(err => notify("Save failed: " + err.message, "bad"));
 }
 async function loadLocal() {
   if (DESKTOP) {
     appMeta = await window.desktopBridge.getMeta().catch(() => null);
     const saved = await window.desktopBridge.loadState().catch(() => null);
     if (saved) state = deepMerge(state, saved);
+    ensureVaultShape();
+    if (!state.vault.selectedCharacterId) state.vault.selectedCharacterId = state.vault.currentCharacterId || state.vault.records[0]?.id || "";
+    if (!state.vault.selectedVersionId) state.vault.selectedVersionId = getVaultRecord(state.vault.selectedCharacterId)?.versions?.[0]?.id || "";
     return;
   }
   try {
@@ -1684,6 +1949,9 @@ async function loadLocal() {
       state = deepMerge(state, parsed);
     }
     if (settings) state.settings = deepMerge(state.settings, JSON.parse(settings));
+    ensureVaultShape();
+    if (!state.vault.selectedCharacterId) state.vault.selectedCharacterId = state.vault.currentCharacterId || state.vault.records[0]?.id || "";
+    if (!state.vault.selectedVersionId) state.vault.selectedVersionId = getVaultRecord(state.vault.selectedCharacterId)?.versions?.[0]?.id || "";
   } catch {}
 }
 function deepMerge(target, src) {
@@ -1759,11 +2027,12 @@ function applyCrop() {
   state.avatar = c.toDataURL("image/png");
   $("cropModal").classList.remove("open");
   render();
+  markDirty(true);
   notify("Image cropped.");
 }
 
 // Events
-$("quickName").oninput = e => { state.data.name = e.target.value; updatePreview(); };
+$("quickName").oninput = e => { state.data.name = e.target.value; updatePreview(); markDirty(); };
 $("avatarWrap").onclick = () => $("avatarInput").click();
 $("avatarInput").onchange = e => { const f = e.target.files[0]; if (f) openCropWithFile(f); e.target.value = ""; };
 $("exportJsonBtn").onclick = exportJson;
@@ -1773,14 +2042,17 @@ $("importFile").onchange = e => { const f = e.target.files[0]; if (f) importFile
 $("saveLocalBtn").onclick = saveLocal;
 $("accentColor").oninput = e => {
   applyAccent(e.target.value);
+  markDirty();
 };
 $("accentText").oninput = e => {
   if (/^#[0-9a-f]{6}$/i.test(e.target.value.trim())) {
     applyAccent(e.target.value.trim());
+    markDirty();
   }
 };
 $("resetAccentBtn").onclick = () => {
   applyAccent("#f28c28");
+  markDirty(true);
 };
 
 $("closeWand").onclick = () => $("wandModal").classList.remove("open");
@@ -1803,8 +2075,8 @@ $("closeImageGen").onclick = () => $("imageGenModal").classList.remove("open");
 $("runImageGen").onclick = runImageGeneration;
 $("useImageAsAvatar").onclick = useGeneratedImageAsAvatar;
 $("downloadImageGen").onclick = downloadGeneratedImage;
-$("imageGenSize").onchange = e => state.settings.imageGenSize = e.target.value;
-$("imageGenCount").onchange = e => state.settings.imageGenCount = Number(e.target.value || 1);
+$("imageGenSize").onchange = e => { state.settings.imageGenSize = e.target.value; markDirty(); };
+$("imageGenCount").onchange = e => { state.settings.imageGenCount = Number(e.target.value || 1); markDirty(); };
 
 $("closeCrop").onclick = $("cancelCrop").onclick = () => $("cropModal").classList.remove("open");
 $("fitCrop").onclick = () => { crop.scale = 1; crop.x = 0; crop.y = 0; $("zoomRange").value = 1; drawCrop(); };
@@ -1832,6 +2104,18 @@ document.addEventListener("keydown", e => {
     $("modelPickerModal").classList.remove("open");
     $("imageGenModal").classList.remove("open");
   }
+});
+window.addEventListener("beforeunload", () => {
+  if (!dirtyState.draft) return;
+  try {
+    const copy = getPersistableState();
+    if (DESKTOP) {
+      window.desktopBridge.saveState(copy).catch(() => {});
+    } else {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(copy));
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify(copy.settings));
+    }
+  } catch {}
 });
 
 async function init() {
