@@ -32,11 +32,22 @@ Browser mode keeps local draft storage, PNG/JSON import/export, and direct API a
 
 ## Editor workspace
 
-The editor uses a persistent section sidebar on desktop and a horizontally
-scrollable section menu on mobile. Portrait, import, export, and draft controls
-are grouped together. Appearance and the live card JSON are expandable panels.
-Field labels and writing-assistant controls have accessible names, and keyboard
-focus is highlighted using the selected accent color.
+The editor has a dedicated left sidebar with grouped navigation buttons and
+twelve pages: Overview, Identity, Portrait Studio, Personality & Story, Opening
+Messages, World & Lore, Instructions, Extensions, Character Vault, Export Card,
+AI Settings, and Appearance. On mobile, the menu button opens the same sidebar
+as a drawer; Escape closes it and keyboard focus stays within the open drawer.
+
+Pages have URL fragments such as `#portrait`, `#core`, and `#export`. Refresh and
+browser Back/Forward preserve the page, while character data remains in the same
+local draft. Import and Save draft are always available in the top toolbar.
+The Overview page shows the current character, content counts, and shortcuts.
+Export Card contains PNG/JSON downloads and a live V2 JSON preview.
+
+The default accent is sage, with five color presets and a custom color control
+on the Appearance page. Existing saved accent preferences are preserved. Field
+labels and writing-assistant controls have accessible names, and keyboard focus
+is highlighted using the selected accent color.
 
 The browser and Electron interfaces share the same HTML. When editing the UI,
 keep `src/renderer/index.html` and `docs/index.html` synchronized. To preview the
