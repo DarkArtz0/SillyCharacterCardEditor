@@ -30,6 +30,18 @@ The repository includes a static browser build in `docs/`.
 
 Browser mode keeps local draft storage, PNG/JSON import/export, and direct API access where the provider allows CORS.
 
+## Editor workspace
+
+The editor uses a persistent section sidebar on desktop and a horizontally
+scrollable section menu on mobile. Portrait, import, export, and draft controls
+are grouped together. Appearance and the live card JSON are expandable panels.
+Field labels and writing-assistant controls have accessible names, and keyboard
+focus is highlighted using the selected accent color.
+
+The browser and Electron interfaces share the same HTML. When editing the UI,
+keep `src/renderer/index.html` and `docs/index.html` synchronized. To preview the
+browser build, serve `docs/` using a local static HTTP server.
+
 ## Portable build
 
 ```bash
